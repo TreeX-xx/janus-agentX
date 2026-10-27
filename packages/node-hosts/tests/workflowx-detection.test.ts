@@ -93,9 +93,9 @@ describe('WorkflowX import recognition', () => {
     await put(join(home, '.codex/config.toml'), 'broken = [')
     expect((await detect()).status).toBe('detected')
   })
-  it('recognizes a registered Claude plugin but rejects another project installation', async () => {
+  it.each(['TreeX-X', 'TreeX-xx'])('recognizes the %s Claude plugin but rejects another project installation', async owner => {
     const installPath = join(home, 'plugin')
-    await put(join(installPath, '.claude-plugin/plugin.json'), plugin)
+    await put(join(installPath, '.claude-plugin/plugin.json'), JSON.stringify({ name: 'workflowx', repository: `https://github.com/${owner}/WorkFlowX` }))
     const registry = (scope: string, projectPath?: string) => JSON.stringify({ plugins: { 'workflowx@official': [{ scope, projectPath, installPath }] } })
     await put(join(home, '.claude/plugins/installed_plugins.json'), registry('user'))
     expect((await detect()).status).toBe('detected')
