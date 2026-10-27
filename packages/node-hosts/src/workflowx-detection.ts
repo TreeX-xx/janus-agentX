@@ -117,7 +117,7 @@ export async function detectWorkflowX(options: WorkflowXDetectionOptions = {}): 
     const data = await json(root, path)
     if (typeof data.name !== 'string' || !isWorkflowX(data.name)) return false
     const repo = typeof data.repository === 'string' ? data.repository : record(data.repository).url
-    const official = typeof repo === 'string' && /^https:\/\/github\.com\/TreeX-X\/workflowx(?:\.git)?\/?$/i.test(repo)
+    const official = typeof repo === 'string' && /^https:\/\/github\.com\/TreeX-(?:X|xx)\/workflowx(?:\.git)?\/?$/i.test(repo)
     add(root, path, disabled ? 'disabled' : active && official ? 'plugin' : 'cache', active && official && !disabled)
     return true
   }
