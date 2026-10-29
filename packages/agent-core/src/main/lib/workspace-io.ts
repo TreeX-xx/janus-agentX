@@ -5,11 +5,19 @@ import { open, rename, unlink } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { resolve, dirname } from 'node:path'
 import { Writable } from 'node:stream'
+import { realpathSync } from 'node:fs'
 import type { FileHandle } from 'node:fs/promises'
 
 export const IO_BATCH_FILES = 32
 export const IO_WAITING_TASKS = 64
 export const IO_BACKGROUND_REST_MS = 20
+
+/** Existing directory aliases share one transaction; missing paths retain a stable lexical key. */
+export function workspaceIoKey(path: string): string {
+  let absolute = resolve(path)
+  try { absolute = realpathSync.native(absolute) } catch { /* Not created or unavailable yet. */ }
+  return process.platform === 'win32' ? absolute.toLowerCase() : absolute
+}
 
 export interface IoOptions { signal?: AbortSignal; background?: boolean; releaseBetweenBatches?: boolean }
 export interface IoBatch {
@@ -39,7 +47,7 @@ export class WorkspaceIoQueue {
   private backgroundRest: Promise<void> | undefined
 
   run<T>(key: string, operation: (batch: IoBatch) => Promise<T>, options: IoOptions = {}): Promise<T> {
-    key = process.platform === 'win32' ? resolve(key).toLowerCase() : resolve(key)
+    key = workspaceIoKey(key)
     const nested = this.context.getStore()
     if (nested) { nested.check(); return operation(nested) }
     if (options.signal?.aborted) return Promise.reject(options.signal.reason ?? new Error('I/O cancelled'))

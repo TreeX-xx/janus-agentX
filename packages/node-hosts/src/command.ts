@@ -15,11 +15,14 @@
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { mkdir } from 'node:fs/promises'
-import { isAbsolute, join } from 'node:path'
+import { isAbsolute, join, relative } from 'node:path'
 import type { Writable } from 'node:stream'
 import { finished } from 'node:stream/promises'
 import {
   resolveWorkspaceTarget,
+  resolveWorkspaceStorage,
+  useWorkspaceStorage,
+  commandLogReadTool,
   createIoWriteStream,
   workspaceIo,
   type RegisteredTool,
@@ -45,7 +48,7 @@ const MAX_ARGUMENT_CHARS = 4096
 const PREVIEW_BYTES = 8 * 1024
 /** Bound the persisted log file so a spammy process cannot grow it without bound. */
 const MAX_LOG_FILE_BYTES = 10 * 1024 * 1024
-const LOG_DIR = '.janusX/logs'
+
 
 /**
  * R4 mirror: env allowlist (operational, non-credential keys, case-insensitive).
@@ -327,61 +330,71 @@ export function createCommandRunTool(jobs: Pick<JobManager, 'start'>): Registere
           name: started.name,
           ...(timeoutMs === undefined ? {} : { timeoutMs }),
           ...(Object.keys(env).length === 0 ? {} : { env }),
-          logPath: started.logPath,
+          logId: started.logPath.split(/[\\/]/).at(-1),
+          logPath: started.logPath, logReadTool: 'command.read-log',
         }
       }
       const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS
       if (!Number.isSafeInteger(timeoutMs) || Number(timeoutMs) < 1_000 || Number(timeoutMs) > MAX_TIMEOUT_MS) {
         throw new Error(`command.run timeoutMs must be an integer between 1000 and ${MAX_TIMEOUT_MS}`)
       }
-      const startedAt = Date.now()
-      let logPath: string | undefined
-      let log: Writable | undefined
-      let logDone: Promise<void> = Promise.resolve()
+      const releaseStorage = useWorkspaceStorage(context.workspaceRoot)
       try {
-        await workspaceIo.run(context.workspaceRoot, () => mkdir(join(context.workspaceRoot, LOG_DIR), { recursive: true }))
-        const name = 'cmd-' + Date.now() + '-' + randomUUID().slice(0, 8) + '.log'
-        logPath = LOG_DIR + '/' + name
-        log = createIoWriteStream(context.workspaceRoot, join(context.workspaceRoot, LOG_DIR, name))
-        logDone = finished(log).catch(() => { logPath = undefined })
-        log.write('# command.run ' + program + '\n# cwd: ' + (cwdTarget.relativePath || '.') + '\n')
-      } catch { logPath = undefined }
-      let result: Awaited<ReturnType<typeof executeCommand>>
-      try {
-        result = await executeCommand(program, args as string[], cwd, Number(timeoutMs), context.signal, env, log)
-        if (log && !log.destroyed) log.end('\n# exitCode: ' + result.exitCode + ' timedOut: ' + result.timedOut +
-          (result.logTruncated ? '\n# log truncated at capture limit\n' : '\n'))
-      } catch (error) {
-        log?.destroy()
+        const startedAt = Date.now()
+        let logPath: string | undefined
+        let logId: string | undefined
+        let log: Writable | undefined
+        let logDone: Promise<void> = Promise.resolve()
+        try {
+          const storage = await resolveWorkspaceStorage(context.workspaceRoot, true)
+          await workspaceIo.run(context.workspaceRoot, () => mkdir(storage.logsPath, { recursive: true }))
+          const name = 'cmd-' + Date.now() + '-' + randomUUID().slice(0, 8) + '.log'
+          logId = name
+          const relation = relative(context.workspaceRoot, join(storage.logsPath, name))
+          logPath = !isAbsolute(relation) && relation !== '..' && !relation.startsWith('..') ? relation.split('\\').join('/') : undefined
+          log = createIoWriteStream(context.workspaceRoot, join(storage.logsPath, name))
+          logDone = finished(log).catch(() => { logPath = undefined; logId = undefined })
+          log.write('# command.run ' + program + '\n# cwd: ' + (cwdTarget.relativePath || '.') + '\n')
+        } catch { logPath = undefined; logId = undefined }
+        let result: Awaited<ReturnType<typeof executeCommand>>
+        try {
+          result = await executeCommand(program, args as string[], cwd, Number(timeoutMs), context.signal, env, log)
+          if (log && !log.destroyed) log.end('\n# exitCode: ' + result.exitCode + ' timedOut: ' + result.timedOut +
+            (result.logTruncated ? '\n# log truncated at capture limit\n' : '\n'))
+        } catch (error) {
+          log?.destroy()
+          await logDone
+          throw error
+        }
         await logDone
-        throw error
-      }
-      await logDone
-      const wallTimeMs = Date.now() - startedAt
-      const totalBytes = result.stdoutBytes + result.stderrBytes
-      return {
-        workspaceId: context.workspaceId,
-        cwd: cwdTarget.relativePath,
-        program: input.program,
-        args,
-        ok: result.exitCode === 0 && !result.timedOut,
-        exitCode: result.exitCode,
-        stdout: result.stdout,
-        stderr: result.stderr,
-        timedOut: result.timedOut,
-        outputTruncated: result.outputTruncated,
-        executionMode: result.executionMode,
-        totalBytes,
-        wallTimeMs,
-        logTruncated: result.logTruncated,
-        timeoutMs: Number(timeoutMs),
-        ...(Object.keys(env).length === 0 ? {} : { env }),
-        ...(logPath ? { logPath } : {}),
-      }
+        const wallTimeMs = Date.now() - startedAt
+        const totalBytes = result.stdoutBytes + result.stderrBytes
+        return {
+          workspaceId: context.workspaceId,
+          cwd: cwdTarget.relativePath,
+          program: input.program,
+          args,
+          ok: result.exitCode === 0 && !result.timedOut,
+          exitCode: result.exitCode,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          timedOut: result.timedOut,
+          outputTruncated: result.outputTruncated,
+          executionMode: result.executionMode,
+          totalBytes,
+          wallTimeMs,
+          logTruncated: result.logTruncated,
+          timeoutMs: Number(timeoutMs),
+          ...(Object.keys(env).length === 0 ? {} : { env }),
+          ...(logId ? { logId, logReadTool: 'command.read-log' } : {}),
+          ...(logPath ? { logPath } : {}),
+        }
+      } finally { releaseStorage() }
     },
   }
 }
 
 export function registerCommandTools(registry: ToolRegistry, jobs: Pick<JobManager, 'start'>): void {
+  if (!registry.get(commandLogReadTool.name)) registry.register(commandLogReadTool)
   if (!registry.get('command.run')) registry.register(createCommandRunTool(jobs))
 }

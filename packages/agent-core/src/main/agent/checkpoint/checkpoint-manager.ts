@@ -6,7 +6,8 @@ import { OVERSIZED_BLOB_BYTES } from './types'
 import { BlobStore } from './blob-store'
 import { GitAdapter } from './git-adapter'
 import { generateUnifiedDiff } from './diff-engine'
-import { workspaceIo, writeIoFile, readIoFile, IO_BATCH_FILES } from '../../lib/workspace-io'
+import { workspaceIo, workspaceIoKey, writeIoFile, readIoFile, IO_BATCH_FILES } from '../../lib/workspace-io'
+import { resolveWorkspaceStorage } from '../../lib/workspace-storage'
 
 const MAX_CHECKPOINTS = 40
 const RETENTION_DAYS = 30
@@ -38,6 +39,7 @@ interface WorkspaceCheckpointState {
   blobStore: BlobStore
   hashCache: Map<string, HashCacheEntry>
   gcSafe: boolean
+  retentionStartedAt?: string
 }
 
 /** NUL byte in the probed head marks binary content; null/empty is text. */
@@ -107,13 +109,14 @@ export class CheckpointManager {
     }
 
     const workspaceKey = this.getWorkspaceKey(resolvedWorkspacePath)
+    const storage = await resolveWorkspaceStorage(resolvedWorkspacePath)
     const existing = this.workspaceStates.get(workspaceKey)
-    if (existing) {
+    if (existing && existing.storagePath === storage.checkpointsPath && existing.retentionStartedAt === storage.retentionStartedAt) {
       this.activeWorkspaceKey = workspaceKey
       return
     }
 
-    const storagePath = join(resolvedWorkspacePath, '.janusX', 'checkpoints')
+    const storagePath = storage.checkpointsPath
     const blobStore = new BlobStore(join(storagePath, 'blobs'))
     const state: WorkspaceCheckpointState = {
       workspacePath: resolvedWorkspacePath,
@@ -122,6 +125,7 @@ export class CheckpointManager {
       blobStore,
       hashCache: new Map<string, HashCacheEntry>(),
       gcSafe: true,
+      retentionStartedAt: storage.retentionStartedAt,
     }
 
     await this.loadIndex(state)
@@ -132,20 +136,21 @@ export class CheckpointManager {
   }
 
   private getWorkspaceKey(workspacePath: string): string {
-    const absolute = resolve(workspacePath)
-    return process.platform === 'win32' ? absolute.toLowerCase() : absolute
+    return workspaceIoKey(workspacePath)
+  }
+
+  /** Caller holds the workspace queue transaction before switching storage. */
+  releaseWorkspace(cwd: string): void {
+    const key = this.getWorkspaceKey(cwd)
+    this.workspaceStates.delete(key)
+    if (this.activeWorkspaceKey === key) this.activeWorkspaceKey = ''
   }
 
   private async getWorkspaceState(cwd?: string): Promise<WorkspaceCheckpointState> {
     if (cwd) {
       const workspaceKey = this.getWorkspaceKey(cwd)
-      let state = this.workspaceStates.get(workspaceKey)
-      if (!state) {
-        await this.initializeState(cwd)
-        state = this.workspaceStates.get(workspaceKey)
-      } else {
-        this.activeWorkspaceKey = workspaceKey
-      }
+      await this.initializeState(cwd)
+      const state = this.workspaceStates.get(workspaceKey)
       if (state) return state
     }
 
@@ -157,6 +162,7 @@ export class CheckpointManager {
   async createCheckpoint(options: CheckpointCreateOptions): Promise<ConversationCheckpoint> {
     return workspaceIo.run(this.getWorkspaceKey(options.cwd || this.activeWorkspaceKey), async () => {
       const state = await this.getWorkspaceState(options.cwd)
+      await resolveWorkspaceStorage(state.workspacePath, true)
       const id = randomUUID()
       const branch = await this.gitAdapter.getCurrentBranch(options.cwd).catch(() => 'unknown')
       const currentIndex = this.nextConversationIndex(state)
@@ -345,7 +351,7 @@ export class CheckpointManager {
     for (const cp of remaining) {
       await workspaceIo.step()
       if (keepNewest.has(cp.id)) continue
-      const createdAt = Date.parse(cp.createdAt)
+      const createdAt = Math.max(Date.parse(cp.createdAt), Date.parse(state.retentionStartedAt ?? cp.createdAt))
       if (!Number.isFinite(createdAt) || createdAt >= cutoff) continue
       await this.deleteCheckpoint(cp.id, state.workspacePath)
     }
@@ -632,6 +638,7 @@ export class CheckpointManager {
     let referenced = new Set<string>()
     let referenceVersion: string | undefined
     for (let offset = 0; offset < storedHashes.length; offset += IO_BATCH_FILES) {
+      if (this.workspaceStates.get(this.getWorkspaceKey(state.workspacePath)) !== state) return
       // Idle batches release directory ownership. Rebuild references after each
       // pause so a new foreground capture can never lose its newly published blob.
       const version = Array.from(state.checkpoints.keys()).join(',')

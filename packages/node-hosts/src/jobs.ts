@@ -2,7 +2,7 @@
  * @file In-process background job manager for host command execution.
  * @description Minimal replacement for the JanusX ProjectRunner adhoc channel:
  * detached-ish spawn (unref'd so a CLI can exit), append-only disk log under
- * `<workspace>/.janusX/logs/`, opt-in timeout kill with SIGTERM→SIGKILL
+ * host-resolved workspace storage, opt-in timeout kill with SIGTERM→SIGKILL
  * escalation, exit snapshots and offset paging. No Electron dependency.
  *
  * Ownership: one JobManager per host session (CLI: per CliSession, disposed
@@ -12,13 +12,14 @@
 import { randomUUID } from 'node:crypto'
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { mkdir, open, readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, relative, isAbsolute } from 'node:path'
+import { resolveWorkspaceStorage, useWorkspaceStorage } from '@janus-agent/agent-core'
 import type { FileHandle } from 'node:fs/promises'
 import { commandExecutionMode, WINDOWS_SHELL_META } from './windows-shell.js'
 
 // Note: background spawn shares the Windows shell shim with sync command.run — see .agents/notes/agent/history/background-jobs-windows-shell-shim.md
 
-const LOG_DIR = '.janusX/logs'
+
 /** P4-tail mirror: keep the last N exited snapshots queryable. */
 const MAX_JOBS = 20
 const MAX_LOG_FILE_BYTES = 10 * 1024 * 1024
@@ -143,10 +144,16 @@ export class JobManager {
     if (useShell && input.args.some((arg) => WINDOWS_SHELL_META.test(arg))) {
       throw new Error('command.run shell-backed arguments contain unsupported metacharacters')
     }
-    await mkdir(join(input.workspaceRoot, LOG_DIR), { recursive: true })
+    const releaseStorage = useWorkspaceStorage(input.workspaceRoot)
+    let storage
+    try {
+      storage = await resolveWorkspaceStorage(input.workspaceRoot, true)
+      await mkdir(storage.logsPath, { recursive: true })
+    } catch (error) { releaseStorage(); throw error }
     const logName = `${projectId}.log`
-    const logAbsPath = join(input.workspaceRoot, LOG_DIR, logName)
-    const logRelPath = `${LOG_DIR}/${logName}`
+    const logAbsPath = join(storage.logsPath, logName)
+    const relation = relative(input.workspaceRoot, logAbsPath)
+    const logRelPath = !isAbsolute(relation) && !relation.startsWith('..') ? relation.split('\\').join('/') : logName
     const header = [
       `# background job ${projectId} (${name})`,
       `# program: ${input.program} ${input.args.join(' ')}`.trimEnd(),
@@ -156,7 +163,7 @@ export class JobManager {
       ...(input.timeoutMs === undefined ? [] : [`# timeoutMs: ${input.timeoutMs}`]),
       '--- output ---',
     ].join('\n')
-    const handle = await open(logAbsPath, 'w')
+    const handle = await open(logAbsPath, 'w').catch(error => { releaseStorage(); throw error })
 
     let child
     try {
@@ -169,8 +176,8 @@ export class JobManager {
       })
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)
-      await handle.write(`${header}\nspawn error: ${detail}\n${spawnHint(input.program)}\n`)
-      await handle.close()
+      try { await handle.write(`${header}\nspawn error: ${detail}\n${spawnHint(input.program)}\n`) }
+      finally { await handle.close().finally(releaseStorage) }
       throw error instanceof Error ? error : new Error(detail)
     }
     // A CLI must be able to exit while jobs run; the disk log keeps them readable.
@@ -242,6 +249,7 @@ export class JobManager {
       } catch {
         // Best effort: the log keeps whatever was captured.
       }
+      finally { await record.handle?.close().catch(() => {}); releaseStorage() }
       record.handle = null
     }
     child.once('error', (error: Error) => {
