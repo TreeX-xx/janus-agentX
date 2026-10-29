@@ -1,6 +1,7 @@
 import { createHash } from 'crypto'
-import { readFile, writeFile, mkdir, access, readdir, unlink, rm } from 'fs/promises'
+import { mkdir, access, readdir, unlink, rm } from 'fs/promises'
 import { join } from 'path'
+import { writeIoFile, readIoFile } from '../../lib/workspace-io'
 
 export class BlobStore {
   private basePath: string
@@ -20,14 +21,15 @@ export class BlobStore {
       await access(filePath)
       // File exists, skip write (dedup)
     } catch {
-      await writeFile(filePath, content)
+      await mkdir(this.basePath, { recursive: true })
+      await writeIoFile(this.basePath, filePath, [content], true)
     }
     return hash
   }
 
   async retrieve(hash: string): Promise<Buffer | null> {
     try {
-      return await readFile(join(this.basePath, hash))
+      return await readIoFile(join(this.basePath, hash))
     } catch {
       return null
     }

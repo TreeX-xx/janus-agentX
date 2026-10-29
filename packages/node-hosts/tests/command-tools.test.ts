@@ -4,7 +4,7 @@
  * and per-action approval wiring. Real WorkspaceAgentRuntime over a temp
  * workspace (no network, no model).
  */
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -129,6 +129,22 @@ describe('node-hosts command.run execution', () => {
     expect(typeof output.logPath).toBe('string')
     expect(existsSync(join(workspaceRoot, String(output.logPath)))).toBe(true)
   })
+
+  it('streams 100 MiB without an exit-time full-output buffer and caps the persisted log', async () => {
+    const { call, workspaceRoot } = await createHarness()
+    const result = await call('command.run', {
+      workspaceId: 'cli', program: 'node', timeoutMs: 30_000,
+      args: ['-e', 'const {once}=require("events");(async()=>{const b=Buffer.alloc(65536,120);for(let i=0;i<1600;i++){if(!process.stdout.write(b))await once(process.stdout,"drain")}})()'],
+    })
+    expect(result.status).toBe('completed')
+    const output = result.output as Record<string, unknown>
+    expect(output.totalBytes).toBe(100 * 1024 * 1024)
+    expect(output.logTruncated).toBe(true)
+    expect(Buffer.byteLength(String(output.stdout))).toBe(8 * 1024)
+    const path = join(workspaceRoot, String(output.logPath))
+    expect(statSync(path).size).toBeLessThan(11 * 1024 * 1024)
+    expect(readFileSync(path, 'utf8')).toContain('# log truncated at capture limit')
+  }, 40_000)
 })
 
 describe('node-hosts command.run background', () => {

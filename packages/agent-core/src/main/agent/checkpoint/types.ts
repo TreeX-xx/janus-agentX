@@ -40,6 +40,7 @@ export interface ConflictInfo {
 }
 
 export interface CheckpointCreateOptions {
+  signal?: AbortSignal
   terminalId: string
   engine: CheckpointEngine
   prompt: string

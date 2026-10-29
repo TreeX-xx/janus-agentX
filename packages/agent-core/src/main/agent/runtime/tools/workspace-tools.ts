@@ -9,6 +9,7 @@ import type { RegisteredTool, ToolRegistry } from '../registry'
 import { isTextBuffer, janusWorkspaceFs, MAX_PAGE_BYTES, MAX_PAGE_LINES } from '../../environment/janus-workspace-fs'
 import { MAX_OUTPUT_TOKEN_BUDGET, estimateOutputTokens, fitItemsToBudget, parseOutputTokenBudget } from './output-budget'
 import { checkpointManager } from '../../checkpoint/checkpoint-manager'
+import { workspaceIo } from '../../../lib/workspace-io'
 import {
   atomicReplaceWorkspaceFile,
   buildLineAnchors,
@@ -239,55 +240,58 @@ export const workspaceEditTool: RegisteredTool = {
     additionalProperties: false,
   },
   execute: async (input, context) => {
-    if (input.workspaceId !== context.workspaceId) {
-      throw new Error('workspace.edit workspaceId must match the active workspace resource')
-    }
-    if (typeof input.path !== 'string' || typeof input.expectedHash !== 'string') {
-      throw new Error('workspace.edit input is invalid')
-    }
-    const hasReplacements = input.replacements !== undefined
-    const hasUnifiedDiff = input.unifiedDiff !== undefined
-    const hasLineEdits = input.lineEdits !== undefined
-    if (Number(hasReplacements) + Number(hasUnifiedDiff) + Number(hasLineEdits) !== 1) {
-      throw new Error('workspace.edit requires exactly one of replacements, unifiedDiff, or lineEdits')
-    }
-    if (hasReplacements && !Array.isArray(input.replacements)) throw new Error('workspace.edit replacements must be an array')
-    if (hasUnifiedDiff && typeof input.unifiedDiff !== 'string') throw new Error('workspace.edit unifiedDiff must be a string')
-    if (hasLineEdits && !Array.isArray(input.lineEdits)) throw new Error('workspace.edit lineEdits must be an array')
-    if (context.signal.aborted) throw new Error('workspace.edit cancelled')
-    const prepare = () => hasUnifiedDiff
-      ? prepareWorkspaceUnifiedDiffEdit(context.workspaceRoot, input.path as string, input.expectedHash as string, input.unifiedDiff as string)
-      : hasLineEdits
-        ? prepareWorkspaceLineEdit(context.workspaceRoot, input.path as string, input.expectedHash as string, input.lineEdits as WorkspaceLineEdit[])
-        : prepareWorkspaceEdit(context.workspaceRoot, input.path as string, input.expectedHash as string, input.replacements as WorkspaceExactReplacement[])
-    let prepared = await prepare()
-    await checkpointManager.initialize(context.workspaceRoot)
-    const checkpoint = await checkpointManager.createCheckpoint({
-      terminalId: `workspace-chat:${context.workspaceId}`,
-      engine: 'manual',
-      prompt: `workspace.edit ${prepared.path}`,
-      cwd: context.workspaceRoot,
-    })
-    if (context.signal.aborted) throw new Error('workspace.edit cancelled')
-    prepared = await prepare()
-    await atomicReplaceWorkspaceFile(context.workspaceRoot, prepared)
-    const callDiff = hasUnifiedDiff
-      ? unifiedInputDiffPreview(input.unifiedDiff)
-      : hasLineEdits
-        ? lineEditsDiffPreview(prepared.path, input.lineEdits)
-        : replacementsDiffPreview(prepared.path, input.replacements)
-    return {
-      workspaceId: context.workspaceId,
-      path: prepared.path,
-      changedPaths: [prepared.path],
-      previousHash: prepared.previousHash,
-      sha256: prepared.nextHash,
-      editMode: prepared.editMode,
-      replacements: prepared.replacements,
-      bytes: Buffer.byteLength(prepared.nextContent),
-      checkpointId: checkpoint.id,
-      ...(callDiff ?? {}),
-    }
+    return workspaceIo.run(context.workspaceRoot, async () => {
+      if (input.workspaceId !== context.workspaceId) {
+        throw new Error('workspace.edit workspaceId must match the active workspace resource')
+      }
+      if (typeof input.path !== 'string' || typeof input.expectedHash !== 'string') {
+        throw new Error('workspace.edit input is invalid')
+      }
+      const hasReplacements = input.replacements !== undefined
+      const hasUnifiedDiff = input.unifiedDiff !== undefined
+      const hasLineEdits = input.lineEdits !== undefined
+      if (Number(hasReplacements) + Number(hasUnifiedDiff) + Number(hasLineEdits) !== 1) {
+        throw new Error('workspace.edit requires exactly one of replacements, unifiedDiff, or lineEdits')
+      }
+      if (hasReplacements && !Array.isArray(input.replacements)) throw new Error('workspace.edit replacements must be an array')
+      if (hasUnifiedDiff && typeof input.unifiedDiff !== 'string') throw new Error('workspace.edit unifiedDiff must be a string')
+      if (hasLineEdits && !Array.isArray(input.lineEdits)) throw new Error('workspace.edit lineEdits must be an array')
+      if (context.signal.aborted) throw new Error('workspace.edit cancelled')
+      const prepare = () => hasUnifiedDiff
+        ? prepareWorkspaceUnifiedDiffEdit(context.workspaceRoot, input.path as string, input.expectedHash as string, input.unifiedDiff as string)
+        : hasLineEdits
+          ? prepareWorkspaceLineEdit(context.workspaceRoot, input.path as string, input.expectedHash as string, input.lineEdits as WorkspaceLineEdit[])
+          : prepareWorkspaceEdit(context.workspaceRoot, input.path as string, input.expectedHash as string, input.replacements as WorkspaceExactReplacement[])
+      let prepared = await prepare()
+      await checkpointManager.initialize(context.workspaceRoot)
+      const checkpoint = await checkpointManager.createCheckpoint({
+        terminalId: `workspace-chat:${context.workspaceId}`,
+        engine: 'manual',
+        prompt: `workspace.edit ${prepared.path}`,
+        cwd: context.workspaceRoot,
+        signal: context.signal,
+      })
+      if (context.signal.aborted) throw new Error('workspace.edit cancelled')
+      prepared = await prepare()
+      await atomicReplaceWorkspaceFile(context.workspaceRoot, prepared)
+      const callDiff = hasUnifiedDiff
+        ? unifiedInputDiffPreview(input.unifiedDiff)
+        : hasLineEdits
+          ? lineEditsDiffPreview(prepared.path, input.lineEdits)
+          : replacementsDiffPreview(prepared.path, input.replacements)
+      return {
+        workspaceId: context.workspaceId,
+        path: prepared.path,
+        changedPaths: [prepared.path],
+        previousHash: prepared.previousHash,
+        sha256: prepared.nextHash,
+        editMode: prepared.editMode,
+        replacements: prepared.replacements,
+        bytes: Buffer.byteLength(prepared.nextContent),
+        checkpointId: checkpoint.id,
+        ...(callDiff ?? {}),
+      }
+    }, { signal: context.signal })
   },
 }
 
@@ -306,34 +310,37 @@ export const workspaceCreateTool: RegisteredTool = {
     additionalProperties: false,
   },
   execute: async (input, context) => {
-    if (input.workspaceId !== context.workspaceId) {
-      throw new Error('workspace.create workspaceId must match the active workspace resource')
-    }
-    if (typeof input.path !== 'string' || typeof input.content !== 'string') {
-      throw new Error('workspace.create input is invalid')
-    }
-    if (Buffer.byteLength(input.content, 'utf-8') > MAX_WORKSPACE_EDIT_BYTES) {
-      throw new Error(`workspace.create content exceeds ${MAX_WORKSPACE_EDIT_BYTES} bytes`)
-    }
-    if (context.signal.aborted) throw new Error('workspace.create cancelled')
-    await checkpointManager.initialize(context.workspaceRoot)
-    const checkpoint = await checkpointManager.createCheckpoint({
-      terminalId: `workspace-chat:${context.workspaceId}`,
-      engine: 'manual',
-      prompt: `workspace.create ${input.path}`,
-      cwd: context.workspaceRoot,
-    })
-    if (context.signal.aborted) throw new Error('workspace.create cancelled')
-    const created = await createWorkspaceFile(context.workspaceRoot, input.path, input.content)
-    return {
-      workspaceId: context.workspaceId,
-      path: created.path,
-      changedPaths: [created.path],
-      sha256: created.sha256,
-      bytes: created.bytes,
-      checkpointId: checkpoint.id,
-      ...(createDiffPreview(created.path, input.content) ?? {}),
-    }
+    return workspaceIo.run(context.workspaceRoot, async () => {
+      if (input.workspaceId !== context.workspaceId) {
+        throw new Error('workspace.create workspaceId must match the active workspace resource')
+      }
+      if (typeof input.path !== 'string' || typeof input.content !== 'string') {
+        throw new Error('workspace.create input is invalid')
+      }
+      if (Buffer.byteLength(input.content, 'utf-8') > MAX_WORKSPACE_EDIT_BYTES) {
+        throw new Error(`workspace.create content exceeds ${MAX_WORKSPACE_EDIT_BYTES} bytes`)
+      }
+      if (context.signal.aborted) throw new Error('workspace.create cancelled')
+      await checkpointManager.initialize(context.workspaceRoot)
+      const checkpoint = await checkpointManager.createCheckpoint({
+        terminalId: `workspace-chat:${context.workspaceId}`,
+        engine: 'manual',
+        prompt: `workspace.create ${input.path}`,
+        cwd: context.workspaceRoot,
+        signal: context.signal,
+      })
+      if (context.signal.aborted) throw new Error('workspace.create cancelled')
+      const created = await createWorkspaceFile(context.workspaceRoot, input.path, input.content)
+      return {
+        workspaceId: context.workspaceId,
+        path: created.path,
+        changedPaths: [created.path],
+        sha256: created.sha256,
+        bytes: created.bytes,
+        checkpointId: checkpoint.id,
+        ...(createDiffPreview(created.path, input.content) ?? {}),
+      }
+    }, { signal: context.signal })
   },
 }
 
@@ -522,51 +529,54 @@ export const workspaceDeleteTool: RegisteredTool = {
     additionalProperties: false,
   },
   execute: async (input, context) => {
-    if (input.workspaceId !== context.workspaceId) {
-      throw new Error('workspace.delete workspaceId must match the active workspace resource')
-    }
-    if (typeof input.path !== 'string') {
-      throw new Error('workspace.delete path must be a string')
-    }
-    const recursive = input.recursive ?? false
-    if (typeof recursive !== 'boolean') {
-      throw new Error('workspace.delete recursive must be a boolean')
-    }
-    if (context.signal.aborted) throw new Error('workspace.delete cancelled')
-    // Same prepare → checkpoint → re-prepare → commit-verify shape as
-    // workspace.edit: the approver saw the first census, the commit verifies it.
-    let prepared = await prepareWorkspaceDelete(context.workspaceRoot, input.path, recursive)
-    await checkpointManager.initialize(context.workspaceRoot)
-    const checkpoint = await checkpointManager.createCheckpoint({
-      terminalId: `workspace-chat:${context.workspaceId}`,
-      engine: 'manual',
-      prompt: `workspace.delete ${prepared.path}`,
-      cwd: context.workspaceRoot,
-    })
-    if (context.signal.aborted) throw new Error('workspace.delete cancelled')
-    prepared = await prepareWorkspaceDelete(context.workspaceRoot, input.path, recursive)
-    // Capture file bytes before the commit so the card shows this call's own
-    // deletion diff; anything unreadable falls back to the kind/size summary.
-    let deletedContent: Buffer | undefined
-    if (prepared.kind === 'file' && prepared.sha256 !== undefined && prepared.bytes <= MAX_DIFF_PREVIEW_SOURCE_BYTES) {
-      try {
-        deletedContent = await readFile(prepared.targetPath)
-      } catch {
-        deletedContent = undefined
+    return workspaceIo.run(context.workspaceRoot, async () => {
+      if (input.workspaceId !== context.workspaceId) {
+        throw new Error('workspace.delete workspaceId must match the active workspace resource')
       }
-    }
-    const committed = await commitWorkspaceDelete(context.workspaceRoot, prepared)
-    return {
-      workspaceId: context.workspaceId,
-      path: committed.path,
-      kind: committed.kind,
-      bytes: committed.bytes,
-      entryCount: committed.entryCount,
-      ...(prepared.sha256 ? { sha256: prepared.sha256 } : {}),
-      changedPaths: [committed.path],
-      checkpointId: checkpoint.id,
-      ...(deletedContent ? (deleteDiffPreview(committed.path, deletedContent) ?? {}) : {}),
-    }
+      if (typeof input.path !== 'string') {
+        throw new Error('workspace.delete path must be a string')
+      }
+      const recursive = input.recursive ?? false
+      if (typeof recursive !== 'boolean') {
+        throw new Error('workspace.delete recursive must be a boolean')
+      }
+      if (context.signal.aborted) throw new Error('workspace.delete cancelled')
+      // Same prepare → checkpoint → re-prepare → commit-verify shape as
+      // workspace.edit: the approver saw the first census, the commit verifies it.
+      let prepared = await prepareWorkspaceDelete(context.workspaceRoot, input.path, recursive)
+      await checkpointManager.initialize(context.workspaceRoot)
+      const checkpoint = await checkpointManager.createCheckpoint({
+        terminalId: `workspace-chat:${context.workspaceId}`,
+        engine: 'manual',
+        prompt: `workspace.delete ${prepared.path}`,
+        cwd: context.workspaceRoot,
+        signal: context.signal,
+      })
+      if (context.signal.aborted) throw new Error('workspace.delete cancelled')
+      prepared = await prepareWorkspaceDelete(context.workspaceRoot, input.path, recursive)
+      // Capture file bytes before the commit so the card shows this call's own
+      // deletion diff; anything unreadable falls back to the kind/size summary.
+      let deletedContent: Buffer | undefined
+      if (prepared.kind === 'file' && prepared.sha256 !== undefined && prepared.bytes <= MAX_DIFF_PREVIEW_SOURCE_BYTES) {
+        try {
+          deletedContent = await readFile(prepared.targetPath)
+        } catch {
+          deletedContent = undefined
+        }
+      }
+      const committed = await commitWorkspaceDelete(context.workspaceRoot, prepared)
+      return {
+        workspaceId: context.workspaceId,
+        path: committed.path,
+        kind: committed.kind,
+        bytes: committed.bytes,
+        entryCount: committed.entryCount,
+        ...(prepared.sha256 ? { sha256: prepared.sha256 } : {}),
+        changedPaths: [committed.path],
+        checkpointId: checkpoint.id,
+        ...(deletedContent ? (deleteDiffPreview(committed.path, deletedContent) ?? {}) : {}),
+      }
+    }, { signal: context.signal })
   },
 }
 

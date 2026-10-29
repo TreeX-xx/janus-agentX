@@ -14,10 +14,14 @@
  */
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
+import type { Writable } from 'node:stream'
+import { finished } from 'node:stream/promises'
 import {
   resolveWorkspaceTarget,
+  createIoWriteStream,
+  workspaceIo,
   type RegisteredTool,
   type ToolRegistry,
 } from '@janus-agent/agent-core'
@@ -96,16 +100,15 @@ interface StreamCapture {
   totalBytes: number
   preview: Buffer[]
   previewBytes: number
-  file: Buffer[]
   fileBytes: number
   fileCapped: boolean
 }
 
 function createCapture(): StreamCapture {
-  return { totalBytes: 0, preview: [], previewBytes: 0, file: [], fileBytes: 0, fileCapped: false }
+  return { totalBytes: 0, preview: [], previewBytes: 0, fileBytes: 0, fileCapped: false }
 }
 
-function captureChunk(capture: StreamCapture, chunk: Buffer): void {
+function captureChunk(capture: StreamCapture, chunk: Buffer): Buffer | undefined {
   capture.totalBytes += chunk.length
   capture.preview.push(chunk)
   capture.previewBytes += chunk.length
@@ -125,12 +128,12 @@ function captureChunk(capture: StreamCapture, chunk: Buffer): void {
     if (room <= 0) {
       capture.fileCapped = true
     } else if (chunk.length <= room) {
-      capture.file.push(chunk)
       capture.fileBytes += chunk.length
+      return chunk
     } else {
-      capture.file.push(chunk.subarray(0, room))
       capture.fileBytes += room
       capture.fileCapped = true
+      return chunk.subarray(0, room)
     }
   }
 }
@@ -142,14 +145,13 @@ function executeCommand(
   timeoutMs: number,
   signal: AbortSignal,
   env: Record<string, string>,
+  log?: Writable,
 ): Promise<{
   exitCode: number | null
   stdout: string
   stderr: string
   stdoutBytes: number
   stderrBytes: number
-  stdoutFull: Buffer
-  stderrFull: Buffer
   logTruncated: boolean
   timedOut: boolean
   outputTruncated: boolean
@@ -181,8 +183,19 @@ function executeCommand(
     let aborted = false
     let settled = false
 
-    child.stdout.on('data', (chunk: Buffer) => captureChunk(stdout, chunk))
-    child.stderr.on('data', (chunk: Buffer) => captureChunk(stderr, chunk))
+    const resume = () => { child.stdout.resume(); child.stderr.resume() }
+    log?.once('error', resume)
+    const record = (capture: StreamCapture, stream: string, chunk: Buffer) => {
+      const kept = captureChunk(capture, chunk)
+      if (!log || log.destroyed || !kept) return
+      log.write('\n--- ' + stream + ' ---\n')
+      if (!log.write(kept)) {
+        child.stdout.pause(); child.stderr.pause()
+        log.once('drain', resume)
+      }
+    }
+    child.stdout.on('data', (chunk: Buffer) => record(stdout, 'stdout', chunk))
+    child.stderr.on('data', (chunk: Buffer) => record(stderr, 'stderr', chunk))
     // Timeout and user abort tree-kill on win32 first so build subtrees cannot leak.
     const stop = () => { tryTreeKill(child.pid); try { child.kill() } catch { /* already gone */ } }
     const abort = () => { aborted = true; stop() }
@@ -213,8 +226,6 @@ function executeCommand(
         stderr: Buffer.concat(stderr.preview).toString('utf-8'),
         stdoutBytes: stdout.totalBytes,
         stderrBytes: stderr.totalBytes,
-        stdoutFull: Buffer.concat(stdout.file),
-        stderrFull: Buffer.concat(stderr.file),
         logTruncated: stdout.fileCapped || stderr.fileCapped,
         timedOut,
         outputTruncated: stdout.totalBytes > stdout.previewBytes || stderr.totalBytes > stderr.previewBytes,
@@ -324,30 +335,30 @@ export function createCommandRunTool(jobs: Pick<JobManager, 'start'>): Registere
         throw new Error(`command.run timeoutMs must be an integer between 1000 and ${MAX_TIMEOUT_MS}`)
       }
       const startedAt = Date.now()
-      const result = await executeCommand(program, args as string[], cwd, Number(timeoutMs), context.signal, env)
+      let logPath: string | undefined
+      let log: Writable | undefined
+      let logDone: Promise<void> = Promise.resolve()
+      try {
+        await workspaceIo.run(context.workspaceRoot, () => mkdir(join(context.workspaceRoot, LOG_DIR), { recursive: true }))
+        const name = 'cmd-' + Date.now() + '-' + randomUUID().slice(0, 8) + '.log'
+        logPath = LOG_DIR + '/' + name
+        log = createIoWriteStream(context.workspaceRoot, join(context.workspaceRoot, LOG_DIR, name))
+        logDone = finished(log).catch(() => { logPath = undefined })
+        log.write('# command.run ' + program + '\n# cwd: ' + (cwdTarget.relativePath || '.') + '\n')
+      } catch { logPath = undefined }
+      let result: Awaited<ReturnType<typeof executeCommand>>
+      try {
+        result = await executeCommand(program, args as string[], cwd, Number(timeoutMs), context.signal, env, log)
+        if (log && !log.destroyed) log.end('\n# exitCode: ' + result.exitCode + ' timedOut: ' + result.timedOut +
+          (result.logTruncated ? '\n# log truncated at capture limit\n' : '\n'))
+      } catch (error) {
+        log?.destroy()
+        await logDone
+        throw error
+      }
+      await logDone
       const wallTimeMs = Date.now() - startedAt
       const totalBytes = result.stdoutBytes + result.stderrBytes
-      // P4 mirror: persist the full log inside the workspace so the model can page
-      // it with workspace_read. A log write failure must not fail the command.
-      let logPath: string | undefined
-      try {
-        await mkdir(join(context.workspaceRoot, LOG_DIR), { recursive: true })
-        const name = `cmd-${Date.now()}-${randomUUID().slice(0, 8)}.log`
-        const header = [
-          `# command.run ${String(input.program)} ${(args as string[]).join(' ')}`.trimEnd(),
-          `# cwd: ${cwdTarget.relativePath || '.'}`,
-          `# exitCode: ${String(result.exitCode)} timedOut: ${String(result.timedOut)} wallTimeMs: ${wallTimeMs}`,
-          `--- stdout (${result.stdoutBytes} bytes) ---`,
-        ].join('\n')
-        const middle = `\n--- stderr (${result.stderrBytes} bytes) ---\n`
-        await writeFile(
-          join(context.workspaceRoot, LOG_DIR, name),
-          Buffer.concat([Buffer.from(`${header}\n`, 'utf-8'), result.stdoutFull, Buffer.from(middle, 'utf-8'), result.stderrFull]),
-        )
-        logPath = `${LOG_DIR}/${name}`
-      } catch {
-        logPath = undefined
-      }
       return {
         workspaceId: context.workspaceId,
         cwd: cwdTarget.relativePath,

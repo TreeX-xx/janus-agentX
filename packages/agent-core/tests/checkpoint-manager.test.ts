@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { join } from 'path'
+import { workspaceIo } from '../src/main/lib/workspace-io'
+
+afterEach(async () => {
+  // Idle GC must finish before Vitest resets this file's filesystem/blob mocks.
+  await vi.waitFor(() => expect((workspaceIo as unknown as { outstanding: number }).outstanding).toBe(0))
+})
 
 // --- Mock infrastructure ---
 
@@ -74,6 +80,28 @@ vi.mock('fs/promises', () => {
       mockFiles[String(path)] = typeof data === 'string' ? data : String(data)
     }),
     mkdir: vi.fn().mockResolvedValue(undefined),
+    rename: vi.fn().mockImplementation(async (from: string, to: string) => {
+      mockFiles[to] = mockFiles[from]
+      delete mockFiles[from]
+    }),
+    open: vi.fn().mockImplementation(async (path: string, mode: string) => {
+      let position = 0
+      if (mode === 'w') mockFiles[path] = ''
+      return {
+        read: vi.fn().mockImplementation(async (buffer: Buffer, offset: number, length: number) => {
+          if (!(path in mockFiles)) throw new Error('ENOENT')
+          const content = Buffer.from(mockFiles[path])
+          const bytesRead = content.copy(buffer, offset, position, position + length)
+          position += bytesRead
+          return { bytesRead }
+        }),
+        write: vi.fn().mockImplementation(async (buffer: Buffer, offset: number, length: number) => {
+          mockFiles[path] += buffer.subarray(offset, offset + length).toString()
+          return { bytesWritten: length }
+        }),
+        close: vi.fn().mockResolvedValue(undefined),
+      }
+    }),
     readdir: vi.fn().mockResolvedValue([]),
     unlink: vi.fn().mockResolvedValue(undefined),
     access: vi.fn().mockImplementation(async (path: string) => {
@@ -128,14 +156,10 @@ describe('CheckpointManager', () => {
     await manager.initialize('/workspace')
   })
 
-  it('initialize() creates storage dirs', async () => {
+  it('initialize() reads metadata without creating storage dirs', async () => {
     const fs = await import('fs/promises')
     const mkdirMock = vi.mocked(fs.mkdir)
-    expect(mkdirMock).toHaveBeenCalled()
-    const firstCallPath = mkdirMock.mock.calls[0][0] as string
-    expect(firstCallPath).toContain('checkpoints')
-    expect(firstCallPath).toContain('blobs')
-    expect(mkdirMock.mock.calls[0][1]).toEqual({ recursive: true })
+    expect(mkdirMock).not.toHaveBeenCalled()
   })
 
   it('createCheckpoint() returns checkpoint with correct fields', async () => {
@@ -314,7 +338,7 @@ describe('CheckpointManager', () => {
 
     const after = await manager.listCheckpoints()
     expect(after.length).toBe(0)
-    expect(storedBlobs.size).toBe(0)
+    await vi.waitFor(() => expect(storedBlobs.size).toBe(0))
   })
 
   it('clearAll() clears checkpoint blobs', async () => {
@@ -560,7 +584,7 @@ describe('hash index fast path', () => {
       terminalId: 'term-1', engine: 'claude', prompt: 'fast', cwd: '/workspace',
     })
     const fs = await import('fs/promises')
-    const readMock = vi.mocked(fs.readFile)
+    const readMock = vi.mocked(fs.open)
     readMock.mockClear()
     const records = await manager.getChangedFileRecords(checkpoint.id, '/workspace')
     expect(records).toEqual([])
