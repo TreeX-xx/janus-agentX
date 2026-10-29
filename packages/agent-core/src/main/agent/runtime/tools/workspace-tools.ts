@@ -1,3 +1,4 @@
+// Note: .agents/notes/agent/workspace-io.md — file tools do not create restore snapshots.
 import { countSearchHits, searchWorkspace } from './workspace-search'
 import { readdir, readFile, stat } from 'fs/promises'
 import { spawn } from 'node:child_process'
@@ -8,7 +9,6 @@ import { evaluateWorkspaceReadPolicy, isSensitivePath, redactHighConfidenceSecre
 import type { RegisteredTool, ToolRegistry } from '../registry'
 import { isTextBuffer, janusWorkspaceFs, MAX_PAGE_BYTES, MAX_PAGE_LINES } from '../../environment/janus-workspace-fs'
 import { MAX_OUTPUT_TOKEN_BUDGET, estimateOutputTokens, fitItemsToBudget, parseOutputTokenBudget } from './output-budget'
-import { checkpointManager } from '../../checkpoint/checkpoint-manager'
 import { workspaceIo } from '../../../lib/workspace-io'
 import {
   atomicReplaceWorkspaceFile,
@@ -263,14 +263,6 @@ export const workspaceEditTool: RegisteredTool = {
           ? prepareWorkspaceLineEdit(context.workspaceRoot, input.path as string, input.expectedHash as string, input.lineEdits as WorkspaceLineEdit[])
           : prepareWorkspaceEdit(context.workspaceRoot, input.path as string, input.expectedHash as string, input.replacements as WorkspaceExactReplacement[])
       let prepared = await prepare()
-      await checkpointManager.initialize(context.workspaceRoot)
-      const checkpoint = await checkpointManager.createCheckpoint({
-        terminalId: `workspace-chat:${context.workspaceId}`,
-        engine: 'manual',
-        prompt: `workspace.edit ${prepared.path}`,
-        cwd: context.workspaceRoot,
-        signal: context.signal,
-      })
       if (context.signal.aborted) throw new Error('workspace.edit cancelled')
       prepared = await prepare()
       await atomicReplaceWorkspaceFile(context.workspaceRoot, prepared)
@@ -288,7 +280,6 @@ export const workspaceEditTool: RegisteredTool = {
         editMode: prepared.editMode,
         replacements: prepared.replacements,
         bytes: Buffer.byteLength(prepared.nextContent),
-        checkpointId: checkpoint.id,
         ...(callDiff ?? {}),
       }
     }, { signal: context.signal })
@@ -321,14 +312,6 @@ export const workspaceCreateTool: RegisteredTool = {
         throw new Error(`workspace.create content exceeds ${MAX_WORKSPACE_EDIT_BYTES} bytes`)
       }
       if (context.signal.aborted) throw new Error('workspace.create cancelled')
-      await checkpointManager.initialize(context.workspaceRoot)
-      const checkpoint = await checkpointManager.createCheckpoint({
-        terminalId: `workspace-chat:${context.workspaceId}`,
-        engine: 'manual',
-        prompt: `workspace.create ${input.path}`,
-        cwd: context.workspaceRoot,
-        signal: context.signal,
-      })
       if (context.signal.aborted) throw new Error('workspace.create cancelled')
       const created = await createWorkspaceFile(context.workspaceRoot, input.path, input.content)
       return {
@@ -337,7 +320,6 @@ export const workspaceCreateTool: RegisteredTool = {
         changedPaths: [created.path],
         sha256: created.sha256,
         bytes: created.bytes,
-        checkpointId: checkpoint.id,
         ...(createDiffPreview(created.path, input.content) ?? {}),
       }
     }, { signal: context.signal })
@@ -516,7 +498,7 @@ function fitEntriesToBudget<T extends { path: string }>(
 
 export const workspaceDeleteTool: RegisteredTool = {
   name: 'workspace.delete',
-  description: 'Delete one workspace file, symlink, or directory after approval. Directories with entries require recursive:true. The workspace root, .janusX audit state, and sensitive paths are refused. Prefer this over shell rm: deletions are previewed, audited, and checkpointed for restore.',
+  description: 'Delete one workspace file, symlink, or directory after approval. Directories with entries require recursive:true. The workspace root, .janusX audit state, and sensitive paths are refused. Prefer this over shell rm: deletions are previewed and audited.',
   actionRisk: 'delete',
   inputSchema: {
     type: 'object',
@@ -544,14 +526,6 @@ export const workspaceDeleteTool: RegisteredTool = {
       // Same prepare → checkpoint → re-prepare → commit-verify shape as
       // workspace.edit: the approver saw the first census, the commit verifies it.
       let prepared = await prepareWorkspaceDelete(context.workspaceRoot, input.path, recursive)
-      await checkpointManager.initialize(context.workspaceRoot)
-      const checkpoint = await checkpointManager.createCheckpoint({
-        terminalId: `workspace-chat:${context.workspaceId}`,
-        engine: 'manual',
-        prompt: `workspace.delete ${prepared.path}`,
-        cwd: context.workspaceRoot,
-        signal: context.signal,
-      })
       if (context.signal.aborted) throw new Error('workspace.delete cancelled')
       prepared = await prepareWorkspaceDelete(context.workspaceRoot, input.path, recursive)
       // Capture file bytes before the commit so the card shows this call's own
@@ -573,7 +547,6 @@ export const workspaceDeleteTool: RegisteredTool = {
         entryCount: committed.entryCount,
         ...(prepared.sha256 ? { sha256: prepared.sha256 } : {}),
         changedPaths: [committed.path],
-        checkpointId: checkpoint.id,
         ...(deletedContent ? (deleteDiffPreview(committed.path, deletedContent) ?? {}) : {}),
       }
     }, { signal: context.signal })

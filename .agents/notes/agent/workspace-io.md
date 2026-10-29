@@ -5,7 +5,7 @@
   "kind": "note",
   "lifecycle": "accepted",
   "created": "2026-10-29",
-  "updated": "2026-10-29T09:41:35.236Z",
+  "updated": "2026-10-29T15:30:05.527Z",
   "module": "note://62b44166-82f0-41ff-838d-e2b02388ed06/86c2d794-3be5-4807-b0fb-1f63c1baa910",
   "relations": [
     {"type":"related-to","target":"note://972afef3-2fc7-49de-a3ee-7e041225d28c/6b511625-c1d4-4b5b-ba17-c983ee9aacfa"}
@@ -16,6 +16,8 @@
 # Workspace I/O batches
 
 Checkpoint operations and workspace edit/create/delete transactions share the exported process-local WorkspaceIoQueue. Nested helpers reuse their transaction and must run sequentially, without detached work. Existing directory aliases use a canonical realpath transaction key; missing paths retain their resolved lexical key. One batch runs at a time; a directory transaction retains ownership when another directory runs at a boundary. Idle collection releases directory ownership between batches. The limits are 32 files per batch, 64 waiting logical tasks, and a shared 20ms rest between background batches. Suspended continuations retain their existing task slot. Queue saturation rejects explicitly; cancellation removes unstarted work and stops started work at cooperative boundaries.
+
+Workspace create/edit/delete no longer create persistent checkpoints or resolve snapshot storage. Their path/policy checks, expected hashes, commit revalidation, exclusive creation, atomic replacement, queue and cancellation remain. Per-call diff previews remain independent of checkpoint blobs. This retires automatic historical recovery for ordinary file tools, including uncommitted deletions; approvals and Git do not replace content backups. Legacy checkpoint engine exports remain for compatibility, but the tools do not invoke them. The CLI no longer labels a legacy checkpoint id as an undo guarantee. Main verification: all 378 core tests pass with one existing skip, including mutations under an unavailable storage resolver and assertions that no checkpoint id or files are produced. Desktop ownership and data cleanup remain with JanusX.
 
 Initialization shares its in-flight promise and loads only existing metadata, without creating directories. Identical in-flight count queries share one scan; empty requests do not scan. Snapshot capture fails instead of publishing partial file maps. Bounded content reads detect growth and changes during capture. Checkpoint files, indices and restored contents use temporary files and rename. GC runs idle, refreshes references after yielding, and coalesces concurrent mutations into a dirty follow-up pass. Unknown, malformed or unreadable checkpoint metadata disables automatic blob collection for that loaded directory, favoring retention over accidental loss.
 

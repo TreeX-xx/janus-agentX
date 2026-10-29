@@ -83,7 +83,7 @@ describe('buildTracePreviews', () => {
     expect(previews[0].summary).toBe('a.txt · (+1 -1) · checkpoint checkpoi')
     expect(previews[0].diff).toContain('-x')
     expect(previews[0].diff).toContain('+y')
-    expect(previews[0].diff.at(-1)).toBe('checkpoint checkpoi · 可撤销')
+    expect(previews[0].diff.at(-1)).toBe('(+1 -1)')
     expect(previews[0].checkpointId).toBe('checkpoint-abcdef123456')
   })
 

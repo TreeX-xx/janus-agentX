@@ -4,6 +4,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { WorkspaceAgentRuntime } from '../src/main/agent/runtime/runtime'
+import { configureWorkspaceStorage } from '../src/main/lib/workspace-storage'
 import {
   registerWorkspaceTools,
   workspaceListTool,
@@ -28,6 +29,29 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 })
 
 const temporaryDirectories: string[] = []
+
+it('mutates files without resolving or creating snapshot storage', async () => {
+  const root = await temporaryDirectory()
+  const resolveStorage = vi.fn(async () => { throw new Error('snapshot disk unavailable') })
+  configureWorkspaceStorage(resolveStorage)
+  try {
+    const runtime = new WorkspaceAgentRuntime(async () => root)
+    registerWorkspaceTools(runtime.registry)
+    autoApprove(runtime)
+    const session = await runtime.createSession({ workspaceId: 'workspace-1', workspaceRoot: root })
+    const call = (toolName: string, input: Record<string, unknown>) => runtime.executeTool({ sessionId: session.id, call: { toolName, input: { workspaceId: 'workspace-1', ...input }, preview: { summary: toolName, paths: [String(input.path)], truncated: false } } })
+    const created = await call('workspace.create', { path: 'file.txt', content: 'before' })
+    expect(created.status, JSON.stringify(created)).toBe('completed')
+    const edited = await call('workspace.edit', { path: 'file.txt', expectedHash: createHash('sha256').update('before').digest('hex'), replacements: [{ oldText: 'before', newText: 'after' }] })
+    expect(edited.status).toBe('completed')
+    expect(await readFile(join(root, 'file.txt'), 'utf8')).toBe('after')
+    expect((await call('workspace.delete', { path: 'file.txt' })).status).toBe('completed')
+    expect(resolveStorage).not.toHaveBeenCalled()
+    expect(created.output).not.toHaveProperty('checkpointId')
+    expect(edited.output).not.toHaveProperty('checkpointId')
+    await expect(readFile(join(root, '.janusX/checkpoints/index.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+  } finally { configureWorkspaceStorage() }
+})
 
 async function temporaryDirectory(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), 'janusx-workspace-tools-'))
@@ -352,7 +376,7 @@ describe('workspace.edit tool', () => {
     })
   }
 
-  it('applies an approved hash-bound replacement and returns a checkpoint', async () => {
+  it('applies an approved hash-bound replacement without snapshot storage', async () => {
     const root = await temporaryDirectory()
     await writeFile(join(root, 'notes.txt'), 'hello workspace', 'utf-8')
     const expectedHash = createHash('sha256').update('hello workspace').digest('hex')
@@ -366,7 +390,6 @@ describe('workspace.edit tool', () => {
         changedPaths: ['notes.txt'],
         previousHash: expectedHash,
         replacements: 1,
-        checkpointId: expect.any(String),
       },
     })
     expect(await readFile(join(root, 'notes.txt'), 'utf-8')).toBe('updated workspace')
@@ -478,7 +501,6 @@ describe('workspace.edit tool', () => {
         editMode: 'unified_diff',
         replacements: 1,
         sha256: createHash('sha256').update('first\nafter\nlast\n').digest('hex'),
-        checkpointId: expect.any(String),
       },
     })
     expect(await readFile(join(root, 'notes.txt'), 'utf-8')).toBe('first\nafter\nlast\n')
@@ -784,7 +806,7 @@ describe('workspace.create tool', () => {
     })
   }
 
-  it('creates an approved new file with checkpoint and hash', async () => {
+  it('creates an approved new file with hash', async () => {
     const root = await temporaryDirectory()
     await mkdir(join(root, 'notes'))
 
@@ -797,7 +819,6 @@ describe('workspace.create tool', () => {
         changedPaths: ['notes/test.md'],
         sha256: createHash('sha256').update('# hello\n').digest('hex'),
         bytes: 8,
-        checkpointId: expect.any(String),
       },
     })
     expect(await readFile(join(root, 'notes/test.md'), 'utf-8')).toBe('# hello\n')
@@ -862,7 +883,7 @@ describe('per-call change diffs', () => {
 
     expect(result).toMatchObject({
       status: 'completed',
-      output: { checkpointId: expect.any(String), diffTruncated: false },
+      output: { diffTruncated: false },
     })
     const diff = String((result.output as Record<string, unknown>).diffPreview)
     expect(diff).toContain('--- a/notes.txt')

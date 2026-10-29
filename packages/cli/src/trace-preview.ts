@@ -133,7 +133,7 @@ export function buildTracePreviews(workspaceRoot: string, traces: ChatToolTraceE
       // then the cumulative git fallback for external edits, else summary-only.
       if (typeof trace.diffPreview === 'string' && trace.diffPreview) {
         const diff = formatDiff(trace.diffPreview)
-        const lines = checkpointId ? [...diff, `checkpoint ${shortCheckpoint(checkpointId)} · 可撤销`] : diff
+        const lines = diff
         return { toolName: trace.toolName, summary: summarizeCallDiff(path, diff, checkpointId), diff: lines, checkpointId }
       }
       const diff = previewFileChange(workspaceRoot, path, { isNew: normalized === 'workspacecreate' })
