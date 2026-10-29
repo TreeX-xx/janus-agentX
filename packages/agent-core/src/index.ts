@@ -100,6 +100,7 @@ export type {
   WorkspaceChatToolOptions,
 } from './main/agent/chat-tools/workspace-chat-tools'
 export { checkpointManager, CheckpointManager } from './main/agent/checkpoint/checkpoint-manager'
+export { configureWorkspaceStorageEvents } from './main/lib/workspace-storage'
 export { WorkspaceIoQueue, workspaceIo, writeIoFile, readIoFile, createIoWriteStream, IO_BATCH_FILES, IO_WAITING_TASKS, IO_BACKGROUND_REST_MS } from './main/lib/workspace-io'
 export type { IoBatch, IoOptions } from './main/lib/workspace-io'
 export { configureWorkspaceStorage, resolveWorkspaceStorage, useWorkspaceStorage, workspaceStorageInUse, assertWorkspaceStorageAvailable, suspendWorkspaceStorage } from './main/lib/workspace-storage'

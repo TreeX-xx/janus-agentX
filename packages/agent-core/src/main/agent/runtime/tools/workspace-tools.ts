@@ -10,6 +10,7 @@ import type { RegisteredTool, ToolRegistry } from '../registry'
 import { isTextBuffer, janusWorkspaceFs, MAX_PAGE_BYTES, MAX_PAGE_LINES } from '../../environment/janus-workspace-fs'
 import { MAX_OUTPUT_TOKEN_BUDGET, estimateOutputTokens, fitItemsToBudget, parseOutputTokenBudget } from './output-budget'
 import { workspaceIo } from '../../../lib/workspace-io'
+import { useWorkspaceStorage } from '../../../lib/workspace-storage'
 import {
   atomicReplaceWorkspaceFile,
   buildLineAnchors,
@@ -240,6 +241,7 @@ export const workspaceEditTool: RegisteredTool = {
     additionalProperties: false,
   },
   execute: async (input, context) => {
+    const release = useWorkspaceStorage(context.workspaceRoot)
     return workspaceIo.run(context.workspaceRoot, async () => {
       if (input.workspaceId !== context.workspaceId) {
         throw new Error('workspace.edit workspaceId must match the active workspace resource')
@@ -282,7 +284,7 @@ export const workspaceEditTool: RegisteredTool = {
         bytes: Buffer.byteLength(prepared.nextContent),
         ...(callDiff ?? {}),
       }
-    }, { signal: context.signal })
+    }, { signal: context.signal }).finally(release)
   },
 }
 
@@ -301,6 +303,7 @@ export const workspaceCreateTool: RegisteredTool = {
     additionalProperties: false,
   },
   execute: async (input, context) => {
+    const release = useWorkspaceStorage(context.workspaceRoot)
     return workspaceIo.run(context.workspaceRoot, async () => {
       if (input.workspaceId !== context.workspaceId) {
         throw new Error('workspace.create workspaceId must match the active workspace resource')
@@ -322,7 +325,7 @@ export const workspaceCreateTool: RegisteredTool = {
         bytes: created.bytes,
         ...(createDiffPreview(created.path, input.content) ?? {}),
       }
-    }, { signal: context.signal })
+    }, { signal: context.signal }).finally(release)
   },
 }
 
@@ -511,6 +514,7 @@ export const workspaceDeleteTool: RegisteredTool = {
     additionalProperties: false,
   },
   execute: async (input, context) => {
+    const release = useWorkspaceStorage(context.workspaceRoot)
     return workspaceIo.run(context.workspaceRoot, async () => {
       if (input.workspaceId !== context.workspaceId) {
         throw new Error('workspace.delete workspaceId must match the active workspace resource')
@@ -549,7 +553,7 @@ export const workspaceDeleteTool: RegisteredTool = {
         changedPaths: [committed.path],
         ...(deletedContent ? (deleteDiffPreview(committed.path, deletedContent) ?? {}) : {}),
       }
-    }, { signal: context.signal })
+    }, { signal: context.signal }).finally(release)
   },
 }
 

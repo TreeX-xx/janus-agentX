@@ -11,6 +11,8 @@ export interface WorkspaceStorage {
 }
 export type WorkspaceStorageResolver = (cwd: string, write?: boolean) => Promise<WorkspaceStorage>
 let resolver: WorkspaceStorageResolver | undefined
+let onRelease: (() => void) | undefined
+export function configureWorkspaceStorageEvents(listener?: () => void): void { onRelease = listener }
 const users = new Map<string, number>()
 const switching = new Set<string>()
 const key = workspaceIoKey
@@ -35,9 +37,13 @@ export function useWorkspaceStorage(cwd: string): () => void {
     const remaining = (users.get(id) ?? 1) - 1
     if (remaining) users.set(id, remaining)
     else users.delete(id)
+    onRelease?.()
   }
 }
-export function workspaceStorageInUse(cwd: string): boolean { return (users.get(key(cwd)) ?? 0) > 0 }
+export function workspaceStorageInUse(cwd: string): boolean {
+  const root = key(cwd), separator = process.platform === 'win32' ? '\\' : '/'
+  return [...users].some(([path, count]) => count > 0 && (path === root || path.startsWith(root + separator)))
+}
 export function assertWorkspaceStorageAvailable(cwd: string): void {
   const path = key(cwd)
   if ([...switching].some(root => path === root || path.startsWith(root + (process.platform === 'win32' ? '\\' : '/')))) throw new Error('Workspace storage migration is running; retry after it finishes')

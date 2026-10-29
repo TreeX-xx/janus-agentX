@@ -5,7 +5,7 @@
   "kind": "note",
   "lifecycle": "accepted",
   "created": "2026-10-29",
-  "updated": "2026-10-29T15:30:05.527Z",
+  "updated": "2026-10-29T16:24:35.804Z",
   "module": "note://62b44166-82f0-41ff-838d-e2b02388ed06/86c2d794-3be5-4807-b0fb-1f63c1baa910",
   "relations": [
     {"type":"related-to","target":"note://972afef3-2fc7-49de-a3ee-7e041225d28c/6b511625-c1d4-4b5b-ba17-c983ee9aacfa"}
@@ -26,6 +26,8 @@ readIoFile/writeIoFile use 64 KiB buffers and cooperative yields. createIoWriteS
 Hosts can configureWorkspaceStorage before consumers start. The resolver returns launch, checkpoint and log paths plus optional retentionStartedAt; an uninjected CLI keeps the legacy .janusX layout. Checkpoint operations revalidate resolved storage before using loaded state, so directory replacement or migration cannot retain an old checkpoint/blob cache. releaseWorkspace drops loaded state inside the host's queue transaction; idle GC stops when its state has been replaced. Age retention uses max(original createdAt, retentionStartedAt), while the existing count limit remains unchanged. Hosts own persisting that timestamp once at successful explicit migration; ordinary initialization does not reset it.
 
 Long-lived sync and node-hosts background log writers acquire a process-local storage usage guard before resolving paths and release it after flush or failure. Hosts suspend new command starts during a switch and reject migration while a writer is active. This is a small usage counter and switching marker, not a separate scheduler or cross-process lock. command.read-log accepts an active workspaceId, filename logId and byte page; it defaults to 16 KiB, caps at 64 KiB and rejects path escape, linked files and workspace mismatch. command.run returns logId/logReadTool for external storage and preserves a relative logPath where available.
+
+JanusX P4 also protects workspace create/edit/delete calls across cooperative yields. Parent storage usage includes descendants; a release callback lets the host retry work previously deferred by an active consumer. Callers release once even after errors or cancellation. The host keeps one expiry timer and owns persistent retention and purge intent; this shared package adds no cleanup policy or thresholds. `workspaceIo.idle` drops inherited foreground context and accepts an optional ownership flag: the default still releases between batches for checkpoint GC, while host lifecycle transactions retain their registry lane and yield the I/O lane to other directories. Core verification is 24 files, 380 passing tests and one existing skip, including descendant guards, single release events, detached maintenance context and retained registry ownership; node-hosts has 64 passing tests in eight files.
 
 Main verification: `npm test --workspace=@janus-agent/agent-core --workspace=@janus-agent/node-hosts` passes 377 core tests in 24 files with one existing skip, plus 64 node-hosts tests in eight files. Both packages build. Real filesystem regressions cover eight terminals, Unicode, cold metadata-only initialization, coalesced queries, failed/cancelled capture, atomic chunk output, GC interleaving and destroyed streams. node-hosts tests include a real 100 MiB subprocess and private-storage sync/background log reads, writer protection and spawn-failure release. JanusX adds migration, cache/alias identity, config inheritance and browser tests; its owning Note contains commands and results. This is Main-agent verification, without an independent reviewer.
 

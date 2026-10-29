@@ -129,8 +129,8 @@ export class WorkspaceIoQueue {
   }
 
   /** Drops inherited transaction context before scheduling later idle work. */
-  idle<T>(key: string, operation: (batch: IoBatch) => Promise<T>): Promise<T> {
-    return this.context.exit(() => this.run(key, operation, { background: true, releaseBetweenBatches: true }))
+  idle<T>(key: string, operation: (batch: IoBatch) => Promise<T>, releaseBetweenBatches = true): Promise<T> {
+    return this.context.exit(() => this.run(key, operation, { background: true, releaseBetweenBatches }))
   }
 
   async step(): Promise<void> { await this.context.getStore()?.step() }

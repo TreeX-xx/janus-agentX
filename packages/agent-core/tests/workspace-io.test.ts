@@ -1,8 +1,22 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { WorkspaceIoQueue } from '../src/main/lib/workspace-io'
+import { useWorkspaceStorage, workspaceStorageInUse, configureWorkspaceStorageEvents, suspendWorkspaceStorage } from '../src/main/lib/workspace-storage'
 
 const gate = () => { let release!: () => void; const promise = new Promise<void>(resolve => { release = resolve }); return { promise, release } }
-afterEach(() => vi.useRealTimers())
+afterEach(() => { vi.useRealTimers(); configureWorkspaceStorageEvents() })
+
+it('protects descendants, emits release once and blocks new consumers during maintenance', () => {
+  const released = vi.fn(); configureWorkspaceStorageEvents(released)
+  const done = useWorkspaceStorage('/janus-fixture/child')
+  expect(workspaceStorageInUse('/janus-fixture')).toBe(true)
+  expect(workspaceStorageInUse('/janus-fixture-other')).toBe(false)
+  expect(() => suspendWorkspaceStorage('/janus-fixture')).toThrow('commands')
+  done(); done(); expect(released).toHaveBeenCalledTimes(1)
+  const resume = suspendWorkspaceStorage('/janus-fixture')
+  try { expect(() => useWorkspaceStorage('/janus-fixture/child')).toThrow('migration') }
+  finally { resume() }
+  useWorkspaceStorage('/janus-fixture/child')()
+})
 
 describe('shared workspace I/O lane', () => {
   it('serializes active batches across directories, but lets another directory run at a boundary', async () => {
@@ -81,5 +95,20 @@ describe('shared workspace I/O lane', () => {
     hold.release()
     await Promise.all([cleanup, write])
     expect(events).toEqual(['gc1', 'write', 'gc2'])
+  })
+
+  it('detaches a host maintenance transaction from its caller and can retain its ownership across yields', async () => {
+    const q = new WorkspaceIoQueue(), events: string[] = [], hold = gate()
+    let maintenance!: Promise<void>
+    await q.run('/registry', async () => {
+      maintenance = q.idle('/registry', async batch => {
+        events.push('maintenance1'); await hold.promise; await batch.yield(); events.push('maintenance2')
+      }, false)
+      expect(events).toEqual([])
+    })
+    const record = q.run('/registry', async () => { events.push('record') })
+    const foreground = q.run('/other', async () => { events.push('foreground') })
+    hold.release(); await Promise.all([maintenance, record, foreground])
+    expect(events).toEqual(['maintenance1', 'foreground', 'maintenance2', 'record'])
   })
 })
